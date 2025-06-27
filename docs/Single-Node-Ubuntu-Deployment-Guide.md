@@ -111,7 +111,7 @@ Logout/login to apply group membership.
 ## 5  Clone & Configure AfCyber SIEM  
 
 ```bash
-git clone https://github.com/your-org/afcyber-siem-saas.git
+git clone https://github.com/ativoj/afcyber-siem-saas.git
 cd afcyber-siem-saas
 cp .env.example .env
 # generate secrets
