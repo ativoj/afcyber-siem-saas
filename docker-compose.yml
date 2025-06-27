@@ -1,0 +1,1073 @@
+version: '3.9'
+
+# AfCyber SIEM Multi-Tenant SaaS Platform
+# Production-ready Docker Compose configuration for Alma Linux deployment
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
+  kafka_net:
+    driver: bridge
+    internal: true
+  elastic_net:
+    driver: bridge
+    internal: true
+  wazuh_net:
+    driver: bridge
+  monitoring:
+    driver: bridge
+
+volumes:
+  # Wazuh
+  wazuh_manager_data:
+  wazuh_manager_etc:
+  wazuh_manager_logs:
+  wazuh_indexer_data:
+  wazuh_dashboard_data:
+  
+  # Graylog
+  graylog_data:
+  graylog_journal:
+  elasticsearch_data:
+  mongodb_data:
+  
+  # TheHive & Cortex
+  thehive_data:
+  thehive_index:
+  cortex_data:
+  
+  # OpenCTI & MISP
+  opencti_data:
+  opencti_elasticsearch_data:
+  misp_data:
+  misp_mysql_data:
+  
+  # Velociraptor
+  velociraptor_data:
+  
+  # Databases
+  postgres_data:
+  redis_data:
+  
+  # Kafka
+  kafka_data:
+  zookeeper_data:
+  schema_registry_data:
+  
+  # ML/AI
+  ml_models:
+  
+  # Monitoring
+  grafana_data:
+  prometheus_data:
+  loki_data:
+
+services:
+  #############################################
+  # API Gateway & Control Plane
+  #############################################
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: afcyber_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx:/etc/nginx/conf.d:ro
+      - ./config/certs:/etc/nginx/certs:ro
+    networks:
+      - frontend
+    depends_on:
+      - saas_api
+      - wazuh_dashboard
+      - graylog
+      - thehive
+      - opencti
+      - grafana
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+  saas_api:
+    image: afcyber/saas-api:latest
+    container_name: afcyber_saas_api
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${POSTGRES_USER}
+      - DB_PASSWORD=${POSTGRES_PASSWORD}
+      - DB_NAME=${POSTGRES_DB}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=${JWT_SECRET}
+      - KAFKA_BROKERS=kafka:9092
+      - LOG_LEVEL=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  tenant_manager:
+    image: afcyber/tenant-manager:latest
+    container_name: afcyber_tenant_manager
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${POSTGRES_USER}
+      - DB_PASSWORD=${POSTGRES_PASSWORD}
+      - DB_NAME=${POSTGRES_DB}
+      - KAFKA_BROKERS=kafka:9092
+      - WAZUH_API_URL=https://wazuh_manager:55000
+      - WAZUH_API_USER=${WAZUH_API_USER}
+      - WAZUH_API_PASSWORD=${WAZUH_API_PASSWORD}
+      - GRAYLOG_API_URL=http://graylog:9000/api
+      - GRAYLOG_API_TOKEN=${GRAYLOG_API_TOKEN}
+      - THEHIVE_URL=http://thehive:9000
+      - THEHIVE_API_KEY=${THEHIVE_API_KEY}
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_API_KEY=${OPENCTI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      wazuh_manager:
+        condition: service_healthy
+      graylog:
+        condition: service_healthy
+      thehive:
+        condition: service_healthy
+      opencti:
+        condition: service_healthy
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  #############################################
+  # Wazuh Components
+  #############################################
+  wazuh_manager:
+    image: wazuh/wazuh-manager:4.7.0
+    container_name: afcyber_wazuh_manager
+    restart: unless-stopped
+    hostname: wazuh-manager
+    ports:
+      - "1514:1514/udp"   # Agent connection service
+      - "1515:1515"       # Agent enrollment service
+      - "514:514/udp"     # Syslog collector
+      - "55000:55000"     # Wazuh API
+    environment:
+      - INDEXER_URL=https://wazuh_indexer:9200
+      - INDEXER_USERNAME=${WAZUH_INDEXER_USERNAME}
+      - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      - FILEBEAT_SSL_VERIFICATION_MODE=none
+    volumes:
+      - wazuh_manager_data:/var/ossec/data
+      - wazuh_manager_etc:/var/ossec/etc
+      - wazuh_manager_logs:/var/ossec/logs
+      - ./config/wazuh/ossec.conf:/var/ossec/etc/ossec.conf
+    networks:
+      - wazuh_net
+      - backend
+    healthcheck:
+      test: ["CMD", "/var/ossec/bin/wazuh-control", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+  wazuh_indexer:
+    image: wazuh/wazuh-indexer:4.7.0
+    container_name: afcyber_wazuh_indexer
+    restart: unless-stopped
+    hostname: wazuh-indexer
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms4g -Xmx4g"
+      - "bootstrap.memory_lock=true"
+      - "discovery.type=single-node"
+      - "cluster.name=wazuh-cluster"
+      - "node.name=wazuh-indexer"
+      - "network.host=0.0.0.0"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - wazuh_indexer_data:/var/lib/wazuh-indexer
+      - ./config/wazuh-indexer/opensearch.yml:/usr/share/wazuh-indexer/opensearch.yml
+    networks:
+      - wazuh_net
+      - elastic_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+  wazuh_dashboard:
+    image: wazuh/wazuh-dashboard:4.7.0
+    container_name: afcyber_wazuh_dashboard
+    restart: unless-stopped
+    hostname: wazuh-dashboard
+    depends_on:
+      - wazuh_indexer
+      - wazuh_manager
+    environment:
+      - INDEXER_USERNAME=${WAZUH_INDEXER_USERNAME}
+      - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      - WAZUH_API_URL=https://wazuh_manager:55000
+      - API_USERNAME=${WAZUH_API_USER}
+      - API_PASSWORD=${WAZUH_API_PASSWORD}
+    volumes:
+      - wazuh_dashboard_data:/usr/share/wazuh-dashboard/data
+      - ./config/wazuh-dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
+    networks:
+      - wazuh_net
+      - frontend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5601/app/wazuh"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  #############################################
+  # Graylog Components
+  #############################################
+  mongodb:
+    image: mongo:6.0
+    container_name: afcyber_mongodb
+    restart: unless-stopped
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - backend
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.12
+    container_name: afcyber_elasticsearch
+    restart: unless-stopped
+    environment:
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - "bootstrap.memory_lock=true"
+      - "discovery.type=single-node"
+      - "xpack.security.enabled=false"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - elastic_net
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+  graylog:
+    image: graylog/graylog:5.1
+    container_name: afcyber_graylog
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+      - elasticsearch
+      - kafka
+    environment:
+      - GRAYLOG_PASSWORD_SECRET=${GRAYLOG_PASSWORD_SECRET}
+      - GRAYLOG_ROOT_PASSWORD_SHA2=${GRAYLOG_ROOT_PASSWORD_SHA2}
+      - GRAYLOG_HTTP_EXTERNAL_URI=http://graylog:9000/
+      - GRAYLOG_ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - GRAYLOG_MONGODB_URI=mongodb://mongodb:27017/graylog
+      - GRAYLOG_ROOT_TIMEZONE=UTC
+      - GRAYLOG_CONTENT_PACKS_AUTO_LOAD=graylog-siem-content-pack.json
+      - GRAYLOG_CONTENT_PACKS_DIR=/usr/share/graylog/data/contentpacks
+      - GRAYLOG_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    volumes:
+      - graylog_data:/usr/share/graylog/data
+      - graylog_journal:/usr/share/graylog/journal
+      - ./config/graylog/contentpacks:/usr/share/graylog/data/contentpacks
+    networks:
+      - frontend
+      - backend
+      - elastic_net
+      - kafka_net
+    ports:
+      - "12201:12201/udp"   # GELF UDP
+      - "1514:1514"         # Syslog TCP
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/api/system/lbstatus"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+  #############################################
+  # TheHive + Cortex
+  #############################################
+  thehive:
+    image: strangebee/thehive:5.1
+    container_name: afcyber_thehive
+    restart: unless-stopped
+    depends_on:
+      - cassandra
+      - elasticsearch
+      - cortex
+    environment:
+      - TH_NO_CONFIG_CORTEX=false
+      - TH_CORTEX_SERVERS_0_NAME=Cortex
+      - TH_CORTEX_SERVERS_0_URL=http://cortex:9001
+      - TH_CORTEX_SERVERS_0_AUTH_TYPE=key
+      - TH_CORTEX_SERVERS_0_KEY=${CORTEX_API_KEY}
+      - TH_ELASTICSEARCH_URLS_0=http://elasticsearch:9200
+      - TH_CASSANDRA_CONTACT_POINTS_0=cassandra:9042
+      - TH_CASSANDRA_LOCAL_DATACENTER=datacenter1
+      - TH_CASSANDRA_USERNAME=${CASSANDRA_USERNAME}
+      - TH_CASSANDRA_PASSWORD=${CASSANDRA_PASSWORD}
+      - TH_CASSANDRA_KEYSPACE=thehive
+      - TH_SECRET=${THEHIVE_SECRET}
+    volumes:
+      - thehive_data:/opt/thp/thehive/data
+      - thehive_index:/opt/thp/thehive/index
+      - ./config/thehive/application.conf:/etc/thehive/application.conf
+    networks:
+      - frontend
+      - backend
+      - elastic_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: afcyber_cassandra
+    restart: unless-stopped
+    environment:
+      - CASSANDRA_CLUSTER_NAME=thehive
+      - CASSANDRA_USER=${CASSANDRA_USERNAME}
+      - CASSANDRA_PASSWORD=${CASSANDRA_PASSWORD}
+      - MAX_HEAP_SIZE=1G
+      - HEAP_NEWSIZE=300M
+    volumes:
+      - ./config/cassandra/cassandra.yaml:/etc/cassandra/cassandra.yaml
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "cqlsh", "-u", "${CASSANDRA_USERNAME}", "-p", "${CASSANDRA_PASSWORD}", "-e", "describe keyspaces"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  cortex:
+    image: thehiveproject/cortex:3.1.1
+    container_name: afcyber_cortex
+    restart: unless-stopped
+    depends_on:
+      - elasticsearch
+    environment:
+      - JOB_DIRECTORY=${JOB_DIRECTORY:-/tmp/cortex-jobs}
+      - CORTEX_SECRET=${CORTEX_SECRET}
+      - ELASTICSEARCH_URI=http://elasticsearch:9200
+    volumes:
+      - cortex_data:/data
+      - ./config/cortex/application.conf:/etc/cortex/application.conf
+      - ./config/cortex/analyzers:/opt/cortex/analyzers
+      - ./config/cortex/responders:/opt/cortex/responders
+    networks:
+      - frontend
+      - backend
+      - elastic_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  #############################################
+  # OpenCTI & MISP
+  #############################################
+  opencti:
+    image: opencti/platform:5.9.6
+    container_name: afcyber_opencti
+    restart: unless-stopped
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=8096
+      - APP__PORT=8080
+      - APP__BASE_URL=${OPENCTI_BASE_URL}
+      - APP__ADMIN__EMAIL=${OPENCTI_ADMIN_EMAIL}
+      - APP__ADMIN__PASSWORD=${OPENCTI_ADMIN_PASSWORD}
+      - APP__ADMIN__TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - REDIS__HOSTNAME=redis
+      - REDIS__PORT=6379
+      - ELASTICSEARCH__URL=http://elasticsearch:9200
+      - MINIO__ENDPOINT=minio
+      - MINIO__PORT=9000
+      - MINIO__ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO__SECRET_KEY=${MINIO_SECRET_KEY}
+      - RABBITMQ__HOSTNAME=rabbitmq
+      - RABBITMQ__PORT=5672
+      - RABBITMQ__USERNAME=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ__PASSWORD=${RABBITMQ_DEFAULT_PASS}
+      - SMTP__HOSTNAME=${SMTP_HOSTNAME}
+      - SMTP__PORT=25
+    depends_on:
+      - redis
+      - elasticsearch
+      - minio
+      - rabbitmq
+    volumes:
+      - opencti_data:/opt/opencti/upload
+    networks:
+      - frontend
+      - backend
+      - elastic_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/graphql"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+  opencti_worker:
+    image: opencti/worker:5.9.6
+    container_name: afcyber_opencti_worker
+    restart: unless-stopped
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - WORKER_LOG_LEVEL=info
+    depends_on:
+      - opencti
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  minio:
+    image: minio/minio:RELEASE.2023-07-21T21-12-44Z
+    container_name: afcyber_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+    volumes:
+      - ./config/minio/data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: afcyber_rabbitmq
+    restart: unless-stopped
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS}
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+
+  misp:
+    image: coolacid/misp:core-latest
+    container_name: afcyber_misp
+    restart: unless-stopped
+    depends_on:
+      - misp_mysql
+    environment:
+      - HOSTNAME=localhost
+      - REDIS_FQDN=redis
+      - INIT=true
+      - MISP_ADMIN_EMAIL=${MISP_ADMIN_EMAIL}
+      - MISP_ADMIN_PASSPHRASE=${MISP_ADMIN_PASSPHRASE}
+      - MISP_BASEURL=${MISP_BASEURL}
+      - MYSQL_HOST=misp_mysql
+      - MYSQL_DATABASE=misp
+      - MYSQL_USER=misp
+      - MYSQL_PASSWORD=${MISP_MYSQL_PASSWORD}
+      - TIMEZONE=UTC
+    volumes:
+      - misp_data:/var/www/MISP
+      - ./config/misp/config.php:/var/www/MISP/app/Config/config.php
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/users/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  misp_mysql:
+    image: mysql:8.0
+    container_name: afcyber_misp_mysql
+    restart: unless-stopped
+    environment:
+      - MYSQL_DATABASE=misp
+      - MYSQL_USER=misp
+      - MYSQL_PASSWORD=${MISP_MYSQL_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${MISP_MYSQL_ROOT_PASSWORD}
+    volumes:
+      - misp_mysql_data:/var/lib/mysql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MISP_MYSQL_ROOT_PASSWORD}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  #############################################
+  # Velociraptor
+  #############################################
+  velociraptor:
+    image: velociraptor/velociraptor:v0.6.9
+    container_name: afcyber_velociraptor
+    restart: unless-stopped
+    command: ["--config", "/etc/velociraptor/server.config.yaml", "frontend"]
+    volumes:
+      - velociraptor_data:/opt/velociraptor
+      - ./config/velociraptor/server.config.yaml:/etc/velociraptor/server.config.yaml
+    networks:
+      - frontend
+      - backend
+    ports:
+      - "8889:8889"  # Frontend
+      - "8000:8000"  # Client communications
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8889/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  #############################################
+  # Kafka Event Streaming
+  #############################################
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: afcyber_zookeeper
+    restart: unless-stopped
+    environment:
+      - ZOOKEEPER_CLIENT_PORT=2181
+      - ZOOKEEPER_TICK_TIME=2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - kafka_net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: afcyber_kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - kafka_net
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  schema_registry:
+    image: confluentinc/cp-schema-registry:7.4.0
+    container_name: afcyber_schema_registry
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    environment:
+      - SCHEMA_REGISTRY_HOST_NAME=schema_registry
+      - SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=kafka:9092
+      - SCHEMA_REGISTRY_LISTENERS=http://0.0.0.0:8081
+    volumes:
+      - schema_registry_data:/etc/schema-registry
+    networks:
+      - kafka_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+  kafka_connect:
+    image: confluentinc/cp-kafka-connect:7.4.0
+    container_name: afcyber_kafka_connect
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - schema_registry
+    environment:
+      - CONNECT_BOOTSTRAP_SERVERS=kafka:9092
+      - CONNECT_REST_PORT=8083
+      - CONNECT_GROUP_ID=afcyber-connect-group
+      - CONNECT_CONFIG_STORAGE_TOPIC=afcyber-connect-configs
+      - CONNECT_OFFSET_STORAGE_TOPIC=afcyber-connect-offsets
+      - CONNECT_STATUS_STORAGE_TOPIC=afcyber-connect-status
+      - CONNECT_KEY_CONVERTER=org.apache.kafka.connect.storage.StringConverter
+      - CONNECT_VALUE_CONVERTER=io.confluent.connect.avro.AvroConverter
+      - CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL=http://schema_registry:8081
+      - CONNECT_REST_ADVERTISED_HOST_NAME=kafka_connect
+      - CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR=1
+      - CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR=1
+      - CONNECT_STATUS_STORAGE_REPLICATION_FACTOR=1
+    networks:
+      - kafka_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  #############################################
+  # Databases
+  #############################################
+  postgres:
+    image: postgres:15-alpine
+    container_name: afcyber_postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./config/postgres/init:/docker-entrypoint-initdb.d
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  redis:
+    image: redis:7-alpine
+    container_name: afcyber_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+
+  #############################################
+  # ML/AI Services
+  #############################################
+  ml_anomaly_detection:
+    image: afcyber/ml-anomaly-detection:latest
+    container_name: afcyber_ml_anomaly_detection
+    restart: unless-stopped
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - MODEL_PATH=/models
+      - LOG_LEVEL=info
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    volumes:
+      - ml_models:/models
+    depends_on:
+      - kafka
+      - elasticsearch
+      - redis
+    networks:
+      - backend
+      - kafka_net
+      - elastic_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  ml_threat_scoring:
+    image: afcyber/ml-threat-scoring:latest
+    container_name: afcyber_ml_threat_scoring
+    restart: unless-stopped
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - MODEL_PATH=/models
+      - LOG_LEVEL=info
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    volumes:
+      - ml_models:/models
+    depends_on:
+      - kafka
+      - elasticsearch
+      - redis
+    networks:
+      - backend
+      - kafka_net
+      - elastic_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  ml_alert_clustering:
+    image: afcyber/ml-alert-clustering:latest
+    container_name: afcyber_ml_alert_clustering
+    restart: unless-stopped
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - MODEL_PATH=/models
+      - LOG_LEVEL=info
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    volumes:
+      - ml_models:/models
+    depends_on:
+      - kafka
+      - elasticsearch
+      - redis
+    networks:
+      - backend
+      - kafka_net
+      - elastic_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  ml_nlp_enrichment:
+    image: afcyber/ml-nlp-enrichment:latest
+    container_name: afcyber_ml_nlp_enrichment
+    restart: unless-stopped
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - MODEL_PATH=/models
+      - LOG_LEVEL=info
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    volumes:
+      - ml_models:/models
+    depends_on:
+      - kafka
+      - elasticsearch
+      - redis
+    networks:
+      - backend
+      - kafka_net
+      - elastic_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+  #############################################
+  # Monitoring & Visualization
+  #############################################
+  grafana:
+    image: grafana/grafana:10.0.3
+    container_name: afcyber_grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-worldmap-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - frontend
+      - monitoring
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+
+  prometheus:
+    image: prom/prometheus:v2.46.0
+    container_name: afcyber_prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: afcyber_loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - ./config/loki/config.yml:/etc/loki/config.yml
+      - loki_data:/loki
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: afcyber_promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./config/promtail/config.yml:/etc/promtail/config.yml
+      - /var/log:/var/log
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9080/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
